@@ -53,7 +53,13 @@ import (
 )`, "main")
 		g.Printf(`
 func (x *%s) WriteTo(w io.Writer) (total int64, err error) {
-	var n int`, tn.Name())
+	var n int
+	var ptrTrue = true
+	var ptrFalse = false
+	var sli *reflect.SliceHeader
+	var str *reflect.StringHeader
+	_, _, _, _, _ = n, ptrTrue, ptrFalse, sli, str // evade unused variable check
+`, tn.Name())
 		g.generate("x", tn.Type())
 		g.Printf(`
 	return
@@ -87,15 +93,16 @@ func (g *generator) generate(name string, t types.Type) {
 		} else {
 			g.generateBasic(name)
 		}
+	case *types.Array:
+		g.generateArray(name, t.Elem())
+	case *types.Struct:
+		g.generateStruct(name, t)
 	case *types.Pointer:
 		g.generatePointer(name, t)
 	case *types.Slice:
-		g.generateLoop(name, t.Elem())
-	case *types.Array:
-		g.generateLoop(name, t.Elem())
-	case *types.Struct:
-		g.generateStruct(name, t)
-
+		g.generateSlice(name, t.Elem())
+	default:
+		panic("unrecognized type: " + t.String())
 	}
 }
 
@@ -113,18 +120,7 @@ func (g *generator) generateBasic(name string) {
 	g.Printf(writeTempl, ptr, size)
 }
 
-func (g *generator) generatePointer(name string, t *types.Pointer) {
-	// TODO: eliminate &*
-	g.generate("(*"+name+")", t.Elem())
-}
-
-func (g *generator) generateString(name string) {
-	ptr := fmt.Sprintf("(*reflect.StringHeader)(unsafe.Pointer(&%s)).Data", name)
-	size := fmt.Sprintf("len(%s)", name) // NOTE: len appears to be just as fast as accessing StringHeader.Len directly
-	g.Printf(writeTempl, ptr, size)
-}
-
-func (g *generator) generateLoop(name string, elem types.Type) {
+func (g *generator) generateArray(name string, elem types.Type) {
 	// TODO: if basic elem, cast array data directly
 	// (short term, just naively recurse)
 	g.Printf("\nfor %c := range %s {", g.loopVar, name)
@@ -141,4 +137,36 @@ func (g *generator) generateStruct(name string, st *types.Struct) {
 	for i := 0; i < st.NumFields(); i++ {
 		g.generate(name+"."+st.Field(i).Name(), st.Field(i).Type())
 	}
+}
+
+func (g *generator) generatePointer(name string, t *types.Pointer) {
+	// TODO: eliminate &*
+	g.Printf("\nif %v != nil {", name)
+	g.generateBasic("ptrTrue")
+	g.generate("(*"+name+")", t.Elem())
+	g.Printf("} else {")
+	g.generateBasic("ptrFalse")
+	g.Printf("}\n")
+}
+
+func (g *generator) generateString(name string) {
+	g.Printf("\nstr = (*reflect.StringHeader)(unsafe.Pointer(&%s))", name)
+	g.generateBasic("str.Len")
+	g.Printf("if str.Len != 0 {")
+	g.Printf(writeTempl, "str.Data", "str.Len")
+	g.Printf("}")
+
+}
+
+func (g *generator) generateSlice(name string, elem types.Type) {
+	// TODO: if basic elem, cast array data directly
+	// (short term, just naively recurse)
+	g.Printf("\nsli = (*reflect.SliceHeader)(unsafe.Pointer(&%s))", name)
+	g.generateBasic("sli.Len")
+	g.Printf("\nfor %c := range %s {", g.loopVar, name)
+	innerName := fmt.Sprintf("%s[%c]", name, g.loopVar)
+	g.loopVar++ // increment loopVar for each nested loop
+	g.generate(innerName, elem)
+	g.loopVar--
+	g.Printf("}\n")
 }
