@@ -60,7 +60,7 @@ func (x *%s) WriteTo(w io.Writer) (total int64, err error) {
 	var str *reflect.StringHeader
 	_, _, _, _, _ = n, ptrTrue, ptrFalse, sli, str // evade unused variable check
 `, tn.Name())
-		g.generate("x", tn.Type())
+		g.generate("(*x)", tn.Type())
 		g.Printf(`
 	return
 }`)
