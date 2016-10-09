@@ -13,6 +13,27 @@ import (
 	"log"
 )
 
+// isContiguous returns true if all of t's data (at least, the data that we
+// care about) lies in one contiguous segment of memory. This includes all
+// basic types (except strings), arrays of contiguous types, and structs
+// containing only contiguous types.
+func isContiguous(t types.Type) bool {
+	switch t := t.Underlying().(type) {
+	case *types.Basic:
+		return t.Kind() != types.String
+	case *types.Array:
+		return isContiguous(t.Elem())
+	case *types.Struct:
+		for i := 0; i < t.NumFields(); i++ {
+			if !isContiguous(t.Field(i).Type()) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 func main() {
 	typeNames := flag.String("type", "", "comma-separated list of type names; must be set")
 	flag.Parse()
@@ -94,13 +115,13 @@ func (g *generator) generate(name string, t types.Type) {
 			g.generateBasic(name)
 		}
 	case *types.Array:
-		g.generateArray(name, t.Elem())
+		g.generateArray(name, t)
 	case *types.Struct:
 		g.generateStruct(name, t)
 	case *types.Pointer:
 		g.generatePointer(name, t)
 	case *types.Slice:
-		g.generateSlice(name, t.Elem())
+		g.generateSlice(name, t)
 	default:
 		panic("unrecognized type: " + t.String())
 	}
@@ -120,13 +141,19 @@ func (g *generator) generateBasic(name string) {
 	g.Printf(writeTempl, ptr, size)
 }
 
-func (g *generator) generateArray(name string, elem types.Type) {
-	// TODO: if basic elem, cast array data directly
-	// (short term, just naively recurse)
+func (g *generator) generateArray(name string, t *types.Array) {
+	if t.Len() == 0 {
+		return
+	}
+	if isContiguous(t) {
+		g.generateBasic(name)
+		return
+	}
+
 	g.Printf("\nfor %c := range %s {", g.loopVar, name)
 	innerName := fmt.Sprintf("%s[%c]", name, g.loopVar)
 	g.loopVar++ // increment loopVar for each nested loop
-	g.generate(innerName, elem)
+	g.generate(innerName, t.Elem())
 	g.loopVar--
 	g.Printf("}\n")
 }
@@ -155,18 +182,21 @@ func (g *generator) generateString(name string) {
 	g.Printf("if str.Len != 0 {")
 	g.Printf(writeTempl, "str.Data", "str.Len")
 	g.Printf("}")
-
 }
 
-func (g *generator) generateSlice(name string, elem types.Type) {
-	// TODO: if basic elem, cast array data directly
-	// (short term, just naively recurse)
+func (g *generator) generateSlice(name string, t *types.Slice) {
 	g.Printf("\nsli = (*reflect.SliceHeader)(unsafe.Pointer(&%s))", name)
 	g.generateBasic("sli.Len")
+
+	if isContiguous(t.Elem()) {
+		g.Printf(writeTempl, "sli.Data", fmt.Sprintf("sli.Len * int(unsafe.Sizeof(%s[0]))", name))
+		return
+	}
+
 	g.Printf("\nfor %c := range %s {", g.loopVar, name)
 	innerName := fmt.Sprintf("%s[%c]", name, g.loopVar)
 	g.loopVar++ // increment loopVar for each nested loop
-	g.generate(innerName, elem)
+	g.generate(innerName, t.Elem())
 	g.loopVar--
 	g.Printf("}\n")
 }
