@@ -11,6 +11,7 @@ import (
 	"go/token"
 	"go/types"
 	"log"
+	"strings"
 )
 
 // isContiguous returns true if all of t's data (at least, the data that we
@@ -159,10 +160,22 @@ func (g *generator) generateArray(name string, t *types.Array) {
 }
 
 func (g *generator) generateStruct(name string, st *types.Struct) {
-	// TODO: if all fields are basic elems, cast struct data directly
-	// (short term, just naively recurse)
 	for i := 0; i < st.NumFields(); i++ {
-		g.generate(name+"."+st.Field(i).Name(), st.Field(i).Type())
+		// slow path
+		if !isContiguous(st.Field(i).Type()) {
+			g.generate(name+"."+st.Field(i).Name(), st.Field(i).Type())
+			continue
+		}
+
+		// group contiguous fields into a single write
+		var sizes []string
+		for j := i; j < st.NumFields() && isContiguous(st.Field(j).Type()); j++ {
+			sizes = append(sizes, fmt.Sprintf("unsafe.Sizeof(%s.%s)", name, st.Field(j).Name()))
+		}
+		groupStart := fmt.Sprintf("uintptr(unsafe.Pointer(&%s.%s))", name, st.Field(i).Name())
+		groupSize := fmt.Sprintf("int(%s)", strings.Join(sizes, "+"))
+		g.Printf(writeTempl, groupStart, groupSize)
+		i += len(sizes) - 1
 	}
 }
 
