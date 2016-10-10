@@ -31,9 +31,9 @@ func isContiguous(t types.Type) bool {
 }
 
 type generator struct {
-	pkg     *types.Package
 	buf     bytes.Buffer
 	loopVar byte // i, j, k, etc.
+	ptr     bool // true if var currently being encoded is a pointer
 }
 
 func (g *generator) format() []byte {
@@ -80,7 +80,9 @@ func (x *%s) WriteTo(w io.Writer) (total int64, err error) {
 	var str *reflect.StringHeader
 	_, _, _ = n, sli, str // evade unused variable check
 `, name)
-	g.generate("(*x)", t)
+	g.ptr = true
+	g.loopVar = 'i'
+	g.generate("x", t)
 	g.Printf(`
 	return
 }`)
@@ -116,9 +118,29 @@ const writeTempl = `
 	total += int64(n)
 `
 
-func (g *generator) generateBasic(name string) {
+func (g *generator) ref(name string) string {
+	if g.ptr {
+		return name
+	}
+	return "&" + name
+}
+
+func (g *generator) deref(name string) string {
+	if g.ptr {
+		return "(*" + name + ")"
+	}
+	return name
+}
+
+func (g *generator) generateConst(name string) {
 	ptr := fmt.Sprintf("uintptr(unsafe.Pointer(&%s))", name)
 	size := fmt.Sprintf("int(unsafe.Sizeof(%s))", name)
+	g.Printf(writeTempl, ptr, size)
+}
+
+func (g *generator) generateBasic(name string) {
+	ptr := fmt.Sprintf("uintptr(unsafe.Pointer(%s))", g.ref(name))
+	size := fmt.Sprintf("int(unsafe.Sizeof(%s))", g.deref(name))
 	g.Printf(writeTempl, ptr, size)
 }
 
@@ -131,8 +153,8 @@ func (g *generator) generateArray(name string, t *types.Array) {
 		return
 	}
 
-	g.Printf("\nfor %c := range %s {", g.loopVar, name)
-	innerName := fmt.Sprintf("%s[%c]", name, g.loopVar)
+	g.Printf("\nfor %c := range %s {", g.loopVar, g.deref(name))
+	innerName := fmt.Sprintf("%s[%c]", g.deref(name), g.loopVar)
 	g.loopVar++ // increment loopVar for each nested loop
 	g.generate(innerName, t.Elem())
 	g.loopVar--
@@ -163,32 +185,34 @@ func (g *generator) generateStruct(name string, st *types.Struct) {
 func (g *generator) generatePointer(name string, t *types.Pointer) {
 	// TODO: eliminate &*
 	g.Printf("\nif %v != nil {", name)
-	g.generateBasic("ptrTrue")
-	g.generate("(*"+name+")", t.Elem())
+	g.generateConst("ptrTrue")
+	g.ptr = true
+	g.generate(name, t.Elem())
+	g.ptr = false
 	g.Printf("} else {")
-	g.generateBasic("ptrFalse")
+	g.generateConst("ptrFalse")
 	g.Printf("}\n")
 }
 
 func (g *generator) generateString(name string) {
-	g.Printf("\nstr = (*reflect.StringHeader)(unsafe.Pointer(&%s))", name)
-	g.generateBasic("str.Len")
+	g.Printf("\nstr = (*reflect.StringHeader)(unsafe.Pointer(%s))", g.ref(name))
+	g.generateConst("str.Len")
 	g.Printf("if str.Len != 0 {")
 	g.Printf(writeTempl, "str.Data", "str.Len")
 	g.Printf("}")
 }
 
 func (g *generator) generateSlice(name string, t *types.Slice) {
-	g.Printf("\nsli = (*reflect.SliceHeader)(unsafe.Pointer(&%s))", name)
-	g.generateBasic("sli.Len")
+	g.Printf("\nsli = (*reflect.SliceHeader)(unsafe.Pointer(%s))", g.ref(name))
+	g.generateConst("sli.Len")
 
 	if isContiguous(t.Elem()) {
-		g.Printf(writeTempl, "sli.Data", fmt.Sprintf("sli.Len * int(unsafe.Sizeof(%s[0]))", name))
+		g.Printf(writeTempl, "sli.Data", fmt.Sprintf("sli.Len * int(unsafe.Sizeof(%s[0]))", g.deref(name)))
 		return
 	}
 
-	g.Printf("\nfor %c := range %s {", g.loopVar, name)
-	innerName := fmt.Sprintf("%s[%c]", name, g.loopVar)
+	g.Printf("\nfor %c := range %s {", g.loopVar, g.deref(name))
+	innerName := fmt.Sprintf("%s[%c]", g.deref(name), g.loopVar)
 	g.loopVar++ // increment loopVar for each nested loop
 	g.generate(innerName, t.Elem())
 	g.loopVar--

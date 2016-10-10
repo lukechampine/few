@@ -82,7 +82,7 @@ func main() {
 	pkg := pkgs[0].Pkg
 
 	// initialize generator and write file header
-	g := generator{loopVar: 'i'}
+	var g generator
 	g.generateHeader(pkg.Name())
 
 	// generate a WriteTo method for each type
