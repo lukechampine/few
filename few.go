@@ -3,73 +3,102 @@ package main
 import (
 	"flag"
 	"fmt"
-	"go/ast"
-	"go/format"
-	"go/importer"
-	"go/parser"
-	"go/token"
-	"go/types"
+	"io/ioutil"
 	"log"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+
+	"golang.org/x/tools/go/loader"
 )
 
+func usage() {
+	fmt.Fprintln(os.Stderr, `Usage of few:
+	few [flags] -type T [package]
+	few [flags] -type T files... # Must be a single package
+Flags:`)
+	flag.PrintDefaults()
+}
+
+// pkgSrcDir returns the directory in which pkgPath resides.
+func pkgSrcDir(pkgPath string) string {
+	// relative path
+	if pkgPath == "." || pkgPath == ".." || strings.HasPrefix(pkgPath, "./") || strings.HasPrefix(pkgPath, "../") {
+		return pkgPath
+	}
+
+	// check stdlib
+	stdPath := filepath.Join(runtime.GOROOT(), "src", pkgPath)
+	if _, err := os.Stat(stdPath); err == nil {
+		return stdPath
+	}
+
+	// check gopath
+	gopath := os.Getenv("GOPATH")
+	if gopath == "" {
+		log.Fatal("couldn't locate source directory: GOPATH not set")
+	}
+	gopathPath := filepath.Join(gopath, "src", pkgPath)
+	if _, err := os.Stat(gopathPath); err == nil {
+		return gopathPath
+	}
+
+	// should never happen, since pkgSrcDir is called after we've successfully
+	// loaded the package
+	panic("couldn't locate source directory for " + pkgPath)
+}
+
 func main() {
+	log.SetFlags(0)
 	typeNames := flag.String("type", "", "comma-separated list of type names; must be set")
+	output := flag.String("output", "", "output file name; default srcdir/<type>_few.go")
+	flag.Usage = usage
 	flag.Parse()
+	if len(*typeNames) == 0 {
+		flag.Usage()
+		os.Exit(2)
+	}
+	types := strings.Split(*typeNames, ",")
 
-	file := flag.Args()[0]
-
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, file, nil, 0)
+	// load the package
+	var conf loader.Config
+	_, err := conf.FromArgs(flag.Args(), false)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	// Type-check the package.
-	// We create an empty map for each kind of input
-	// we're interested in, and Check populates them.
-	info := types.Info{
-		Defs: make(map[*ast.Ident]types.Object),
-	}
-	var conf types.Config
-	conf.Importer = importer.Default()
-	_, err = conf.Check("", fset, []*ast.File{f}, &info)
+	lprog, err := conf.Load()
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	for _, obj := range info.Defs {
-		tn, ok := obj.(*types.TypeName)
-		if !ok || tn.Name() != *typeNames {
-			continue
-		}
-		g := generator{loopVar: 'i'}
-		g.Printf(`package %s
-
-import (
-	"io"
-	"reflect"
-	"unsafe"
-)`, "main")
-		g.Printf(`
-func (x *%s) WriteTo(w io.Writer) (total int64, err error) {
-	var n int
-	var ptrTrue = true
-	var ptrFalse = false
-	var sli *reflect.SliceHeader
-	var str *reflect.StringHeader
-	_, _, _, _, _ = n, ptrTrue, ptrFalse, sli, str // evade unused variable check
-`, tn.Name())
-		g.generate("(*x)", tn.Type())
-		g.Printf(`
-	return
-}`)
-		src, err := format.Source(g.buf.Bytes())
-		if err != nil {
-			log.Fatal(err)
-		}
-		fmt.Println(string(src))
-		return
+	pkgs := lprog.InitialPackages()
+	if len(pkgs) != 1 {
+		log.Fatalf("expected 1 package, got %v", len(pkgs))
 	}
-	fmt.Println("not found")
-	return
+	pkg := pkgs[0].Pkg
+
+	// initialize generator and write file header
+	g := generator{loopVar: 'i'}
+	g.generateHeader(pkg.Name())
+
+	// generate a WriteTo method for each type
+	for _, t := range types {
+		obj := pkg.Scope().Lookup(t)
+		if obj == nil {
+			log.Fatalf("%s.%s not found", pkg.Name(), t)
+		}
+		g.generateMethod(obj.Name(), obj.Type())
+	}
+
+	// format the output
+	src := g.format()
+
+	// write to file
+	if *output == "" {
+		*output = filepath.Join(pkgSrcDir(pkg.Path()), fmt.Sprintf("%s_few.go", filepath.Base(pkg.Path())))
+	}
+	err = ioutil.WriteFile(*output, src, 0644)
+	if err != nil {
+		log.Fatalln("couldn't write generated code:", err)
+	}
 }
