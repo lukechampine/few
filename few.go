@@ -62,8 +62,12 @@ func main() {
 	types := strings.Split(*typeNames, ",")
 
 	// load the package
+	args := flag.Args()
+	if len(args) == 0 {
+		args = []string{"."}
+	}
 	var conf loader.Config
-	_, err := conf.FromArgs(flag.Args(), false)
+	_, err := conf.FromArgs(args, false)
 	if err != nil {
 		log.Fatal(err)
 	}
