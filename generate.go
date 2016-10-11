@@ -30,10 +30,22 @@ func isContiguous(t types.Type) bool {
 	return false
 }
 
+func ref(name string, indir int) string {
+	if indir > 0 {
+		return deref(name, indir-1)
+	}
+	return "&" + name
+}
+
+func deref(name string, indir int) string {
+	if indir > 0 {
+		return strings.Repeat("*", indir) + name
+	}
+	return name
+}
+
 type generator struct {
-	buf     bytes.Buffer
-	loopVar byte // i, j, k, etc.
-	ptr     bool // true if var currently being encoded is a pointer
+	buf bytes.Buffer
 }
 
 func (g *generator) format() []byte {
@@ -80,31 +92,31 @@ func (x *%s) WriteTo(w io.Writer) (total int64, err error) {
 	var str *reflect.StringHeader
 	_, _, _ = n, sli, str // evade unused variable check
 `, name)
-	g.ptr = true
-	g.loopVar = 'i'
-	g.generate("x", t)
+	// indir=1 because x is a pointer
+	g.generate("x", t, 1, 'i')
 	g.Printf(`
 	return
 }`)
 }
 
-func (g *generator) generate(name string, t types.Type) {
+// indir is the number of dereferences required to access name's data.
+func (g *generator) generate(name string, t types.Type, indir int, loopVar byte) {
 	switch t := t.Underlying().(type) {
 	case *types.Basic:
 		if t.Kind() == types.String {
 			// unlike other basic types, strings have a pointer indirection
-			g.generateString(name)
+			g.generateString(name, indir)
 		} else {
-			g.generateBasic(name)
+			g.generateBasic(name, indir)
 		}
 	case *types.Array:
-		g.generateArray(name, t)
+		g.generateArray(name, t, indir, loopVar)
 	case *types.Struct:
-		g.generateStruct(name, t)
+		g.generateStruct(name, t, indir, loopVar)
 	case *types.Pointer:
-		g.generatePointer(name, t)
+		g.generatePointer(name, t, indir, loopVar)
 	case *types.Slice:
-		g.generateSlice(name, t)
+		g.generateSlice(name, t, indir, loopVar)
 	default:
 		log.Fatal("cannot encode type: " + t.String())
 	}
@@ -118,54 +130,32 @@ const writeTempl = `
 	total += int64(n)
 `
 
-func (g *generator) ref(name string) string {
-	if g.ptr {
-		return name
-	}
-	return "&" + name
-}
-
-func (g *generator) deref(name string) string {
-	if g.ptr {
-		return "(*" + name + ")"
-	}
-	return name
-}
-
-func (g *generator) generateConst(name string) {
-	ptr := fmt.Sprintf("uintptr(unsafe.Pointer(&%s))", name)
-	size := fmt.Sprintf("int(unsafe.Sizeof(%s))", name)
+func (g *generator) generateBasic(name string, indir int) {
+	ptr := fmt.Sprintf("uintptr(unsafe.Pointer(%s))", ref(name, indir))
+	size := fmt.Sprintf("int(unsafe.Sizeof(%s))", deref(name, indir))
 	g.Printf(writeTempl, ptr, size)
 }
 
-func (g *generator) generateBasic(name string) {
-	ptr := fmt.Sprintf("uintptr(unsafe.Pointer(%s))", g.ref(name))
-	size := fmt.Sprintf("int(unsafe.Sizeof(%s))", g.deref(name))
-	g.Printf(writeTempl, ptr, size)
-}
-
-func (g *generator) generateArray(name string, t *types.Array) {
+func (g *generator) generateArray(name string, t *types.Array, indir int, loopVar byte) {
 	if t.Len() == 0 {
 		return
 	}
 	if isContiguous(t) {
-		g.generateBasic(name)
+		g.generateBasic(name, indir)
 		return
 	}
 
-	g.Printf("\nfor %c := range %s {", g.loopVar, g.deref(name))
-	innerName := fmt.Sprintf("%s[%c]", g.deref(name), g.loopVar)
-	g.loopVar++ // increment loopVar for each nested loop
-	g.generate(innerName, t.Elem())
-	g.loopVar--
+	g.Printf("\nfor %c := range %s {", loopVar, deref(name, indir-1))
+	innerName := fmt.Sprintf("%s[%c]", deref(name, indir-1), loopVar)
+	g.generate(innerName, t.Elem(), indir, loopVar+1)
 	g.Printf("}\n")
 }
 
-func (g *generator) generateStruct(name string, st *types.Struct) {
+func (g *generator) generateStruct(name string, st *types.Struct, indir int, loopVar byte) {
 	for i := 0; i < st.NumFields(); i++ {
 		// slow path
 		if !isContiguous(st.Field(i).Type()) {
-			g.generate(name+"."+st.Field(i).Name(), st.Field(i).Type())
+			g.generate(deref(name, indir-1)+"."+st.Field(i).Name(), st.Field(i).Type(), indir-1, loopVar)
 			continue
 		}
 
@@ -173,48 +163,43 @@ func (g *generator) generateStruct(name string, st *types.Struct) {
 		// NOTE: struct padding will be included
 		var sizes []string
 		for j := i; j < st.NumFields() && isContiguous(st.Field(j).Type()); j++ {
-			sizes = append(sizes, fmt.Sprintf("unsafe.Sizeof(%s.%s)", name, st.Field(j).Name()))
+			sizes = append(sizes, fmt.Sprintf("unsafe.Sizeof(%s.%s)", deref(name, indir-1), st.Field(j).Name()))
 		}
-		groupStart := fmt.Sprintf("uintptr(unsafe.Pointer(&%s.%s))", name, st.Field(i).Name())
+		groupStart := fmt.Sprintf("uintptr(unsafe.Pointer(&%s.%s))", deref(name, indir-1), st.Field(i).Name())
 		groupSize := fmt.Sprintf("int(%s)", strings.Join(sizes, "+"))
 		g.Printf(writeTempl, groupStart, groupSize)
 		i += len(sizes) - 1
 	}
 }
 
-func (g *generator) generatePointer(name string, t *types.Pointer) {
-	// TODO: eliminate &*
+func (g *generator) generatePointer(name string, t *types.Pointer, indir int, loopVar byte) {
 	g.Printf("\nif %v != nil {", name)
-	g.generateConst("ptrTrue")
-	g.ptr = true
-	g.generate(name, t.Elem())
-	g.ptr = false
+	g.generateBasic("ptrTrue", 0)
+	g.generate(name, t.Elem(), indir+1, loopVar)
 	g.Printf("} else {")
-	g.generateConst("ptrFalse")
+	g.generateBasic("ptrFalse", 0)
 	g.Printf("}\n")
 }
 
-func (g *generator) generateString(name string) {
-	g.Printf("\nstr = (*reflect.StringHeader)(unsafe.Pointer(%s))", g.ref(name))
-	g.generateConst("str.Len")
+func (g *generator) generateString(name string, indir int) {
+	g.Printf("\nstr = (*reflect.StringHeader)(unsafe.Pointer(%s))", ref(name, indir))
+	g.generateBasic("str.Len", 0)
 	g.Printf("if str.Len != 0 {")
 	g.Printf(writeTempl, "str.Data", "str.Len")
 	g.Printf("}")
 }
 
-func (g *generator) generateSlice(name string, t *types.Slice) {
-	g.Printf("\nsli = (*reflect.SliceHeader)(unsafe.Pointer(%s))", g.ref(name))
-	g.generateConst("sli.Len")
+func (g *generator) generateSlice(name string, t *types.Slice, indir int, loopVar byte) {
+	g.Printf("\nsli = (*reflect.SliceHeader)(unsafe.Pointer(%s))", ref(name, indir))
+	g.generateBasic("sli.Len", 0)
 
 	if isContiguous(t.Elem()) {
-		g.Printf(writeTempl, "sli.Data", fmt.Sprintf("sli.Len * int(unsafe.Sizeof(%s[0]))", g.deref(name)))
+		g.Printf(writeTempl, "sli.Data", fmt.Sprintf("sli.Len * int(unsafe.Sizeof(%s[0]))", deref(name, indir)))
 		return
 	}
 
-	g.Printf("\nfor %c := range %s {", g.loopVar, g.deref(name))
-	innerName := fmt.Sprintf("%s[%c]", g.deref(name), g.loopVar)
-	g.loopVar++ // increment loopVar for each nested loop
-	g.generate(innerName, t.Elem())
-	g.loopVar--
+	g.Printf("\nfor %c := range %s {", loopVar, deref(name, indir))
+	innerName := fmt.Sprintf("%s[%c]", deref(name, indir), loopVar)
+	g.generate(innerName, t.Elem(), indir, loopVar+1)
 	g.Printf("}\n")
 }
