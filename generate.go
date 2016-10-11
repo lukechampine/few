@@ -96,7 +96,8 @@ func (x *%s) WriteTo(w io.Writer) (total int64, err error) {
 	g.generate("x", t, 1, 'i')
 	g.Printf(`
 	return
-}`)
+}
+`)
 }
 
 // indir is the number of dereferences required to access name's data.
@@ -153,22 +154,22 @@ func (g *generator) generateArray(name string, t *types.Array, indir int, loopVa
 
 func (g *generator) generateStruct(name string, st *types.Struct, indir int, loopVar byte) {
 	for i := 0; i < st.NumFields(); i++ {
-		// slow path
-		if !isContiguous(st.Field(i).Type()) {
+		// slow path, including single continuous fields
+		if !isContiguous(st.Field(i).Type()) || i == st.NumFields()-1 || !isContiguous(st.Field(i+1).Type()) {
 			g.generate(deref(name, indir-1)+"."+st.Field(i).Name(), st.Field(i).Type(), indir-1, loopVar)
 			continue
 		}
 
 		// group contiguous fields into a single write
 		// NOTE: struct padding will be included
-		var sizes []string
-		for j := i; j < st.NumFields() && isContiguous(st.Field(j).Type()); j++ {
-			sizes = append(sizes, fmt.Sprintf("unsafe.Sizeof(%s.%s)", deref(name, indir-1), st.Field(j).Name()))
+		startField := deref(name, indir-1) + "." + st.Field(i).Name()
+		for j := i + 1; j < st.NumFields() && isContiguous(st.Field(j).Type()); j++ {
+			i++
 		}
-		groupStart := fmt.Sprintf("uintptr(unsafe.Pointer(&%s.%s))", deref(name, indir-1), st.Field(i).Name())
-		groupSize := fmt.Sprintf("int(%s)", strings.Join(sizes, "+"))
-		g.Printf(writeTempl, groupStart, groupSize)
-		i += len(sizes) - 1
+		endField := deref(name, indir-1) + "." + st.Field(i).Name()
+		runPtr := fmt.Sprintf("uintptr(unsafe.Pointer(&%s))", startField)
+		runSize := fmt.Sprintf("int(unsafe.Offsetof(%[1]s)+unsafe.Sizeof(%[1]s) - unsafe.Offsetof(%[2]s))", endField, startField)
+		g.Printf(writeTempl, runPtr, runSize)
 	}
 }
 
