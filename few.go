@@ -99,7 +99,12 @@ func main() {
 
 	// write to file
 	if *output == "" {
-		*output = filepath.Join(pkgSrcDir(pkg.Path()), fmt.Sprintf("%s_few.go", filepath.Base(pkg.Path())))
+		if len(lprog.Created) == 1 {
+			// if creating from a set of go files, always output to cwd
+			*output = fmt.Sprintf("%s_few.go", filepath.Base(pkg.Path()))
+		} else {
+			*output = filepath.Join(pkgSrcDir(pkg.Path()), fmt.Sprintf("%s_few.go", filepath.Base(pkg.Path())))
+		}
 	}
 	err = ioutil.WriteFile(*output, src, 0644)
 	if err != nil {
